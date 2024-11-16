@@ -7,6 +7,7 @@
 #include <ArduinoJson.h>
 #include <secrets.h>
 #include <Hashtable.h>
+#include <ESP32Time.h>
 
 // Global state
 String globalPayload;
@@ -26,10 +27,10 @@ const char *serverName = "http://192.168.1.187:8080/";
 
 WiFiClient client;
 HTTPClient http;
-
+ESP32Time rtc(0); // offset in seconds GMT+1
 struct Location
 {
-  int occuredAt;
+  int occurredAt;
   float position;
 };
 
@@ -45,10 +46,10 @@ public:
   Location locations[MAX_LOCATIONS];
   Car(uint8_t _driverNumber) : driverNumber(_driverNumber) {}
 
-  void addLocation(int occuredAt, float position)
+  void addLocation(int occurredAt, float position)
   {
-    // this is occured before the data we already have so we don't need it
-    if (locations[endIndex].occuredAt > occuredAt)
+    // this is occurred before the data we already have so we don't need it
+    if (locations[endIndex].occurredAt > occurredAt)
     {
       return;
     }
@@ -63,32 +64,54 @@ public:
       return;
     }
     endIndex = newEndIndex;
-    locations[endIndex] = {occuredAt, position};
+    locations[endIndex] = {occurredAt, position};
   }
 };
 
+const int CARS_BUFFER_SIZE = 30;
 // I really tried to use a hashtable here but the arduino library is ass
-Car *cars[20];
+Car *cars[CARS_BUFFER_SIZE];
+
+uint64_t getCurrentTime()
+{
+  return static_cast<uint64_t>(rtc.getEpoch()) * 1000ULL + rtc.getMillis();
+}
+
+Car *getCarByNumber(int driverNumber)
+{
+  for (int i = 0; i < CARS_BUFFER_SIZE; i++)
+  {
+    if (cars[i] != nullptr && cars[i]->driverNumber == driverNumber)
+    {
+      return cars[i];
+    }
+  }
+  return nullptr;
+}
+
+void setupDateTime()
+{
+  configTime(0, 0, "time.google.com");
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo))
+  {
+    rtc.setTimeStruct(timeinfo);
+  }
+}
 
 void updateLocations(JsonDocument doc)
 {
   // Lock the mutex before modifying the global variable
   if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
   {
-    int i = 0;
+
     for (JsonVariant location : doc["locations"].as<JsonArray>())
     {
-      // Car *car = cars.get(location["driverNumber"].as<int>());
-      // if (car == nullptr)
-      // {
-      //   // Serial.print("Received location for unknown driver: ");
-      //   // Serial.println(location["driverNumber"].as<int>());
-      // }
-      // else
-      // {
-      //   car->addLocation(location["occuredAt"], location["position"]);
-      // }
-      i++;
+      Car *car = getCarByNumber(location["driverNumber"].as<int>());
+      if (car != nullptr)
+      {
+        car->addLocation(location["date"], location["position"]);
+      }
     }
     xSemaphoreGive(xMutex); // Release the mutex
   }
@@ -156,7 +179,6 @@ void loadDrivers()
       Serial.println(httpResponseCode);
       delay(1000); // Delay for 1 second before retrying
     }
-
     http.end();
   }
 }
@@ -177,6 +199,9 @@ void setup()
   // Create the mutex
   xMutex = xSemaphoreCreateMutex();
 
+  // Setup the date and time
+  setupDateTime();
+
   // Get the drivers
   loadDrivers();
 
@@ -186,11 +211,14 @@ void setup()
 
 void loop()
 {
+
+  Serial.println(getCurrentTime());
+  return;
   // Lock the mutex before reading the global variable
   if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
   {
     // this should be dynamic
-    for (int i = 0; i < 20; i++)
+    for (int i = 0; i < CARS_BUFFER_SIZE; i++)
     {
       if (cars[i] != nullptr)
       {
