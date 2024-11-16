@@ -9,9 +9,11 @@
 #include <Hashtable.h>
 #include <ESP32Time.h>
 
+#include "locationService.h"
+#include "driverService.h"
+
 // Global state
 String globalPayload;
-SemaphoreHandle_t xMutex;
 
 const char *ssid = SSID;
 const char *password = PASSWORD;
@@ -22,17 +24,16 @@ IPAddress gateway(192, 168, 1, 254);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress dns(8, 8, 8, 8); // Google DNS
 
-// Your Domain name with URL path or IP address with path
-const char *serverName = "http://192.168.1.187:8080/";
-
-WiFiClient client;
-HTTPClient http;
-ESP32Time rtc(0); // offset in seconds GMT+1
 struct Location
 {
-  int occurredAt;
+  uint64_t occurredAt;
   float position;
 };
+
+WiFiClient client;
+ESP32Time rtc(0); // offset in seconds GMT+1
+LocationService locationService(&rtc, &client);
+DriverService driverService(&client);
 
 class Car
 {
@@ -40,13 +41,21 @@ private:
   static const int MAX_LOCATIONS = 128;
   int startIndex = 0;
   int endIndex = 0;
+  Location locations[MAX_LOCATIONS];
+  SemaphoreHandle_t xMutex;
 
 public:
   uint8_t driverNumber;
-  Location locations[MAX_LOCATIONS];
-  Car(uint8_t _driverNumber) : driverNumber(_driverNumber) {}
+  Car(uint8_t _driverNumber) : driverNumber(_driverNumber)
+  {
+    xMutex = xSemaphoreCreateMutex();
+    for (int i = 0; i < MAX_LOCATIONS; i++)
+    {
+      locations[i] = {0, 0};
+    }
+  }
 
-  void addLocation(int occurredAt, float position)
+  void addLocation(uint64_t occurredAt, float position)
   {
     // this is occurred before the data we already have so we don't need it
     if (locations[endIndex].occurredAt > occurredAt)
@@ -63,8 +72,23 @@ public:
       Serial.println("Buffer full");
       return;
     }
+    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
+    {
+      locations[endIndex] = {occurredAt, position};
+      xSemaphoreGive(xMutex);
+    }
     endIndex = newEndIndex;
-    locations[endIndex] = {occurredAt, position};
+  }
+
+  Location getLocation()
+  {
+    Location loc;
+    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
+    {
+      loc = locations[0];
+      xSemaphoreGive(xMutex);
+    }
+    return loc;
   }
 };
 
@@ -99,87 +123,40 @@ void setupDateTime()
   }
 }
 
-void updateLocations(JsonDocument doc)
+void updateLocations(LocationDto *locations, int amountInBuffer)
 {
-  // Lock the mutex before modifying the global variable
-  if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
+  for (size_t i = 0; i < amountInBuffer; i++)
   {
+    LocationDto currentLocation = locations[i];
+    Car *car = getCarByNumber(currentLocation.driverNumer);
 
-    for (JsonVariant location : doc["locations"].as<JsonArray>())
-    {
-      Car *car = getCarByNumber(location["driverNumber"].as<int>());
-      if (car != nullptr)
-      {
-        car->addLocation(location["date"], location["position"]);
-      }
-    }
-    xSemaphoreGive(xMutex); // Release the mutex
+    // TODO: check if the driver number exists
+    car->addLocation(currentLocation.occuredAt, currentLocation.position);
   }
-}
-
-void loadLocations()
-{
-  http.useHTTP10(true);
-  http.begin(client, String(serverName) + "locations");
-  int httpResponseCode = http.GET();
-
-  if (httpResponseCode > 0)
-  {
-    Serial.print("HTTP Response code: ");
-    Serial.println(httpResponseCode);
-    JsonDocument doc;
-    deserializeJson(doc, http.getStream());
-    updateLocations(doc);
-  }
-  else
-  {
-    Serial.print("Error code: ");
-    Serial.println(httpResponseCode);
-  }
-
-  http.end();
 }
 
 void httpRequestTask(void *pvParameters)
 {
-  for (;;)
+  LocationDto buffer[1500];
+  while (true)
   {
-    loadLocations();
+    int newLocations = locationService.fetchData(buffer);
+    updateLocations(buffer, newLocations);
     vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay for 1 second
   }
 }
 
 void loadDrivers()
 {
-  bool success = false;
-  while (!success)
+  uint8_t driverNumbers[30];
+  int driverCount = 0;
+  while (driverCount == 0)
   {
-    http.useHTTP10(true);
-    http.begin(client, String(serverName) + "drivers");
-    int httpResponseCode = http.GET();
-
-    if (httpResponseCode > 0)
-    {
-      Serial.print("Driver HTTP Response code: ");
-      Serial.println(httpResponseCode);
-      JsonDocument doc;
-      deserializeJson(doc, http.getStream());
-      int i;
-      for (JsonVariant driver : doc.as<JsonArray>())
-      {
-        int driverNumber = driver["driverNumber"].as<int>();
-        Car *car = new Car(driverNumber);
-        cars[i++] = car;
-      }
-      success = true;
-    }
-    else
-    {
-      Serial.print("Driver error code: ");
-      Serial.println(httpResponseCode);
-      delay(1000); // Delay for 1 second before retrying
-    }
-    http.end();
+    driverCount = driverService.fetchData(driverNumbers);
+  }
+  for (int i = 0; i < driverCount; i++)
+  {
+    cars[i] = new Car(driverNumbers[i]);
   }
 }
 
@@ -196,9 +173,6 @@ void setup()
 
   Serial.println("Connected to WiFi");
 
-  // Create the mutex
-  xMutex = xSemaphoreCreateMutex();
-
   // Setup the date and time
   setupDateTime();
 
@@ -206,29 +180,26 @@ void setup()
   loadDrivers();
 
   // Create the HTTP request task
-  xTaskCreate(httpRequestTask, "HTTP Request Task", 4096, NULL, 1, NULL);
+  xTaskCreate(httpRequestTask, "HTTP Request Task", 32768, NULL, 1, NULL);
 }
 
+LocationDto buffer[4096];
 void loop()
 {
 
-  Serial.println(getCurrentTime());
-  return;
-  // Lock the mutex before reading the global variable
-  if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
+  for (int i = 0; i < CARS_BUFFER_SIZE; i++)
   {
-    // this should be dynamic
-    for (int i = 0; i < CARS_BUFFER_SIZE; i++)
+    if (cars[i] != nullptr)
     {
-      if (cars[i] != nullptr)
-      {
-        Serial.print("Driver Number: ");
-        Serial.println(cars[i]->driverNumber);
-      }
+      Car *car = cars[i];
+
+      Location location = car->getLocation();
+
+      Serial.print("driver number: ");
+      Serial.print(cars[i]->driverNumber);
+      Serial.print(" position: ");
+      Serial.println(location.position);
     }
-
-    xSemaphoreGive(xMutex); // Release the mutex
   }
-
-  delay(1000); // Delay for 1 second
+  delay(2000); // Delay for 1 second
 }
