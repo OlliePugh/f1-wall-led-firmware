@@ -31,69 +31,200 @@ class Car
 {
 private:
   static const int MAX_LOCATIONS = 128;
-  int startIndex = 0;
-  int endIndex = 0;
-  Location locations[MAX_LOCATIONS];
+  Location *locations[MAX_LOCATIONS];
   SemaphoreHandle_t xMutex;
 
 public:
   uint8_t driverNumber;
-  Car(uint8_t _driverNumber) : driverNumber(_driverNumber)
+  String name;
+  Car(uint8_t _driverNumber, String _name) : driverNumber(_driverNumber), name(_name)
   {
     xMutex = xSemaphoreCreateMutex();
     for (int i = 0; i < MAX_LOCATIONS; i++)
     {
-      locations[i] = {0, 0};
+      locations[i] = nullptr;
     }
   }
 
-  void addLocation(uint64_t occurredAt, float position)
+  void removeOutdatedLocations()
   {
-    // this is occurred before the data we already have so we don't need it
-    if (locations[endIndex].occurredAt > occurredAt)
-    {
-      return;
-    }
-
-    // if the end index would mean that the end index would be the same as the start index
-    // and start overwriting the data
-    int newEndIndex = (endIndex + 1) % MAX_LOCATIONS;
-
-    if (newEndIndex == startIndex)
-    {
-      Serial.println("Buffer full");
-      return;
-    }
-    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
-    {
-      locations[endIndex] = {occurredAt, position};
-      xSemaphoreGive(xMutex);
-    }
-    endIndex = newEndIndex;
-  }
-
-  Location getLocation()
-  {
-    Location loc;
     if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
     {
       // get the current time from the rtc
       uint64_t currentTime = timeService.getTime();
 
-      // find first location that is just before the current time
-      int i = startIndex;
-      while (locations[i].occurredAt < currentTime && i != endIndex)
+      // Remove outdated locations
+      int lastValidIndex = -1;
+      for (int i = 0; i < MAX_LOCATIONS; i++)
       {
-        Serial.println("skipping");
-        i = (i + 1) % MAX_LOCATIONS;
+        if (locations[i] != nullptr && locations[i]->occurredAt < currentTime)
+        {
+          lastValidIndex = i;
+        }
       }
 
-      startIndex = i;
+      for (int i = 0; i < lastValidIndex; i++)
+      {
+        if (locations[i] != nullptr)
+        {
+          // Serial.println("removing location because it is in the past");
+          delete locations[i];
+          locations[i] = nullptr;
+        }
+      }
 
-      loc = locations[i];
+      // Shift all non-null pointers to the left
+      int shiftIndex = 0;
+      for (int i = 0; i < MAX_LOCATIONS; i++)
+      {
+        if (locations[i] != nullptr)
+        {
+          locations[shiftIndex++] = locations[i];
+        }
+      }
+
+      // Set the remaining pointers to nullptr
+      for (int i = shiftIndex; i < MAX_LOCATIONS; i++)
+      {
+        locations[i] = nullptr;
+      }
+
       xSemaphoreGive(xMutex);
     }
-    return loc;
+    else
+    {
+      Serial.println("could not take mutex");
+    }
+  }
+
+  void addLocation(uint64_t occurredAt, float position)
+  {
+    removeOutdatedLocations();
+    // if the data is in the past we can ignore it
+    if (occurredAt < timeService.getTime())
+    {
+      return;
+    }
+
+    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
+    {
+      // check if this location is already in the queue
+      for (int i = 0; i < MAX_LOCATIONS; i++)
+      {
+        if (locations[i] != nullptr &&
+            locations[i]->occurredAt == occurredAt &&
+            locations[i]->position == position)
+        {
+          // Serial.println("Location already exists in the queue");
+          // nothing to do
+          xSemaphoreGive(xMutex);
+          return;
+        }
+      }
+
+      bool successfull = false;
+      // add it to the end of the locations queue
+      for (int i = 0; i < MAX_LOCATIONS; i++)
+      {
+        if (locations[i] == nullptr)
+        {
+          locations[i] = new Location{occurredAt, position};
+          successfull = true;
+          break;
+        }
+      }
+
+      if (!successfull)
+      {
+        Serial.println("Buffer full");
+      }
+
+      xSemaphoreGive(xMutex);
+    }
+    else
+    {
+      Serial.println("could not take mutex");
+    }
+  }
+
+  Location *getLocation()
+  {
+    removeOutdatedLocations();
+    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
+    {
+      Location *loc = locations[0];
+      xSemaphoreGive(xMutex);
+      return loc;
+    }
+
+    return nullptr;
+    //   // get the current time from the rtc
+    //   uint64_t currentTime = timeService.getTime();
+
+    //   // find first location that is just before the current time
+    //   while (!locations.isEmpty() && locations.getHead().occurredAt < currentTime)
+    //   {
+    //     Serial.println("removing location because it is in the past");
+    //     locations.dequeue();
+    //   }
+
+    //   if (locations.isEmpty())
+    //   {
+    //     xSemaphoreGive(xMutex);
+    //     Serial.println("No locations available");
+    //     return nullptr;
+    //   }
+
+    //   loc = locations.getHeadPtr();
+    //   if (loc == nullptr)
+    //   {
+    //     xSemaphoreGive(xMutex);
+    //     Serial.println("current location is null");
+    //     return nullptr;
+    //   }
+    //   Serial.print("event time ");
+    //   Serial.println(loc->occurredAt);
+    //   Serial.print("current time ");
+    //   Serial.println(currentTime);
+
+    //   xSemaphoreGive(xMutex);
+    // }
+    // else
+    // {
+    //   Serial.println("could not take mutex");
+    // }
+    // return loc;
+  }
+
+  void debug()
+  {
+    Serial.print("Driver number: ");
+    Serial.println(driverNumber);
+    Serial.print("====== LOCATION DUMP (CAR ");
+    Serial.print(driverNumber);
+    Serial.println(") ======");
+
+    if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
+    {
+      // Print the locations from the array
+      for (int i = 0; i < MAX_LOCATIONS; i++)
+      {
+        if (locations[i] != nullptr)
+        {
+          Serial.print("occurred at: ");
+          Serial.print(locations[i]->occurredAt);
+          Serial.print(" position: ");
+          Serial.println(locations[i]->position);
+        }
+      }
+
+      xSemaphoreGive(xMutex);
+    }
+    else
+    {
+      Serial.println("could not take mutex");
+    }
+    Serial.println("====== END LOCATION DUMP ======");
   }
 };
 
@@ -131,18 +262,18 @@ void updateLocations(LocationDto *locations, int amountInBuffer)
       offsetSet = true;
     }
 
-    // TODO: ONYL TESTING WITH DRIVER ONE
-    if (currentLocation.driverNumer != 1)
-    {
-      return;
-    }
-
     Car *car = getCarByNumber(currentLocation.driverNumer);
 
     // TODO: check if the driver number exists
     if (car != nullptr)
     {
       car->addLocation(currentLocation.occuredAt, currentLocation.position);
+      // car->debug();
+    }
+    else
+    {
+      Serial.print("car not found with number ");
+      Serial.println(currentLocation.driverNumer);
     }
   }
 }
@@ -160,7 +291,7 @@ void httpRequestTask(void *pvParameters)
 
 void loadDrivers()
 {
-  uint8_t driverNumbers[30];
+  Driver driverNumbers[30];
   int driverCount = 0;
   while (driverCount == 0)
   {
@@ -168,7 +299,7 @@ void loadDrivers()
   }
   for (int i = 0; i < driverCount; i++)
   {
-    cars[i] = new Car(driverNumbers[i]);
+    cars[i] = new Car(driverNumbers[i].driverNumber, driverNumbers[i].name);
   }
 }
 
@@ -195,29 +326,22 @@ void setup()
 LocationDto buffer[4096];
 void loop()
 {
-
-  Car *car = cars[0];
-
-  Location location = car->getLocation();
-
-  Serial.print("driver number: ");
-  Serial.print(cars[0]->driverNumber);
-  Serial.print(" position: ");
-  Serial.println(location.position);
-
-  // for (int i = 0; i < CARS_BUFFER_SIZE; i++)
-  // {
-  //   if (cars[i] != nullptr)
-  //   {
-  //     Car *car = cars[i];
-
-  //     Location location = car->getLocation();
-
-  //     Serial.print("driver number: ");
-  //     Serial.print(cars[i]->driverNumber);
-  //     Serial.print(" position: ");
-  //     Serial.println(location.position);
-  //   }
-  // }
-  // delay(2000); // Delay for 2 seconds
+  for (int i = 0; i < CARS_BUFFER_SIZE; i++)
+  {
+    if (cars[i] != nullptr)
+    {
+      Location *loc = cars[i]->getLocation();
+      if (loc != nullptr)
+      {
+        Serial.print(">");
+        Serial.print(cars[i]->name);
+        Serial.print(":");
+        Serial.println(loc->position);
+      }
+      else
+      {
+        Serial.println("No valid location");
+      }
+    }
+  }
 }

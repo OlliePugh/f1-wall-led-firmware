@@ -8,7 +8,7 @@ DriverService::DriverService(WiFiClient *client)
     this->client = client;
 }
 
-int DriverService::fetchData(uint8_t *drivers)
+int DriverService::fetchData(Driver *drivers)
 {
     if (WiFi.status() != WL_CONNECTED)
     {
@@ -31,7 +31,9 @@ int DriverService::fetchData(uint8_t *drivers)
         for (JsonVariant driver : doc.as<JsonArray>())
         {
             int driverNumber = driver["driverNumber"].as<int>();
-            drivers[i++] = driverNumber;
+            String name = driver["nameAcronym"].as<String>();
+            Driver driverInstance = {driverNumber, name};
+            drivers[i++] = driverInstance;
         }
     }
     else

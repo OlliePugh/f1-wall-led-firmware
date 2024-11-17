@@ -4,12 +4,18 @@
 #ifndef DRIVERSERVICE_H
 #define DRIVERSERVICE_H
 
+struct Driver
+{
+    uint8_t driverNumber;
+    String name;
+};
+
 class DriverService
 {
 public:
     DriverService(
         WiFiClient *client);
-    int fetchData(uint8_t *drivers);
+    int fetchData(Driver *drivers);
     static const String endpoint;
 
 private:
