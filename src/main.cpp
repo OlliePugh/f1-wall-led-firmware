@@ -152,48 +152,37 @@ public:
     removeOutdatedLocations();
     if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
     {
-      Location *loc = locations[0];
+      // get last location
+      Location *previous = locations[0];
+      Location *next = locations[1];
+
+      if (previous == nullptr)
+      {
+        xSemaphoreGive(xMutex);
+        return nullptr;
+      }
+
+      if (next == nullptr)
+      {
+        xSemaphoreGive(xMutex);
+        return previous;
+      }
+
+      // get the current time from the rtc
+      uint64_t currentTime = timeService.getTime();
+      Location *loc = nullptr;
+      // check if the current time is between the two locations
+      if (previous->occurredAt <= currentTime && currentTime <= next->occurredAt)
+      {
+        // calculate the position between the two locations
+        float position = previous->position + (next->position - previous->position) * (currentTime - previous->occurredAt) / (next->occurredAt - previous->occurredAt);
+        loc = new Location{currentTime, position};
+      }
       xSemaphoreGive(xMutex);
       return loc;
     }
 
     return nullptr;
-    //   // get the current time from the rtc
-    //   uint64_t currentTime = timeService.getTime();
-
-    //   // find first location that is just before the current time
-    //   while (!locations.isEmpty() && locations.getHead().occurredAt < currentTime)
-    //   {
-    //     Serial.println("removing location because it is in the past");
-    //     locations.dequeue();
-    //   }
-
-    //   if (locations.isEmpty())
-    //   {
-    //     xSemaphoreGive(xMutex);
-    //     Serial.println("No locations available");
-    //     return nullptr;
-    //   }
-
-    //   loc = locations.getHeadPtr();
-    //   if (loc == nullptr)
-    //   {
-    //     xSemaphoreGive(xMutex);
-    //     Serial.println("current location is null");
-    //     return nullptr;
-    //   }
-    //   Serial.print("event time ");
-    //   Serial.println(loc->occurredAt);
-    //   Serial.print("current time ");
-    //   Serial.println(currentTime);
-
-    //   xSemaphoreGive(xMutex);
-    // }
-    // else
-    // {
-    //   Serial.println("could not take mutex");
-    // }
-    // return loc;
   }
 
   void debug()
@@ -337,6 +326,7 @@ void loop()
         Serial.print(cars[i]->name);
         Serial.print(":");
         Serial.println(loc->position);
+        delete loc;
       }
       else
       {
