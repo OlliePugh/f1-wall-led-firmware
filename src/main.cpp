@@ -1,28 +1,17 @@
 #include <Arduino.h>
-#include <HTTPClient.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <ArduinoJson.h>
 #include <secrets.h>
-#include <Hashtable.h>
-#include <ESP32Time.h>
 
 #include "locationService.h"
 #include "driverService.h"
-
-// Global state
-String globalPayload;
+#include "timeService.h"
 
 const char *ssid = SSID;
 const char *password = PASSWORD;
-
-// TODO: is the below needed?
-IPAddress local_IP(192, 168, 1, 144);
-IPAddress gateway(192, 168, 1, 254);
-IPAddress subnet(255, 255, 255, 0);
-IPAddress dns(8, 8, 8, 8); // Google DNS
 
 struct Location
 {
@@ -34,6 +23,9 @@ WiFiClient client;
 ESP32Time rtc(0); // offset in seconds GMT+1
 LocationService locationService(&rtc, &client);
 DriverService driverService(&client);
+TimeService timeService(&rtc);
+
+bool offsetSet = false;
 
 class Car
 {
@@ -85,7 +77,20 @@ public:
     Location loc;
     if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
     {
-      loc = locations[0];
+      // get the current time from the rtc
+      uint64_t currentTime = timeService.getTime();
+
+      // find first location that is just before the current time
+      int i = startIndex;
+      while (locations[i].occurredAt < currentTime && i != endIndex)
+      {
+        Serial.println("skipping");
+        i = (i + 1) % MAX_LOCATIONS;
+      }
+
+      startIndex = i;
+
+      loc = locations[i];
       xSemaphoreGive(xMutex);
     }
     return loc;
@@ -96,11 +101,6 @@ const int CARS_BUFFER_SIZE = 30;
 // I really tried to use a hashtable here but the arduino library is ass
 Car *cars[CARS_BUFFER_SIZE];
 
-uint64_t getCurrentTime()
-{
-  return static_cast<uint64_t>(rtc.getEpoch()) * 1000ULL + rtc.getMillis();
-}
-
 Car *getCarByNumber(int driverNumber)
 {
   for (int i = 0; i < CARS_BUFFER_SIZE; i++)
@@ -110,17 +110,9 @@ Car *getCarByNumber(int driverNumber)
       return cars[i];
     }
   }
+  Serial.print("cat not available with number ");
+  Serial.println(driverNumber);
   return nullptr;
-}
-
-void setupDateTime()
-{
-  configTime(0, 0, "time.google.com");
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo))
-  {
-    rtc.setTimeStruct(timeinfo);
-  }
 }
 
 void updateLocations(LocationDto *locations, int amountInBuffer)
@@ -128,10 +120,30 @@ void updateLocations(LocationDto *locations, int amountInBuffer)
   for (size_t i = 0; i < amountInBuffer; i++)
   {
     LocationDto currentLocation = locations[i];
+    if (!offsetSet)
+    {
+      // i.e. we are running an simulation as opposte to realtime
+      if (timeService.getTime() - currentLocation.occuredAt > 100000)
+      {
+        Serial.println("Updating local time to match server");
+        timeService.setServerTime(currentLocation.occuredAt);
+      }
+      offsetSet = true;
+    }
+
+    // TODO: ONYL TESTING WITH DRIVER ONE
+    if (currentLocation.driverNumer != 1)
+    {
+      return;
+    }
+
     Car *car = getCarByNumber(currentLocation.driverNumer);
 
     // TODO: check if the driver number exists
-    car->addLocation(currentLocation.occuredAt, currentLocation.position);
+    if (car != nullptr)
+    {
+      car->addLocation(currentLocation.occuredAt, currentLocation.position);
+    }
   }
 }
 
@@ -173,10 +185,7 @@ void setup()
 
   Serial.println("Connected to WiFi");
 
-  // Setup the date and time
-  setupDateTime();
-
-  // Get the drivers
+  timeService.setup();
   loadDrivers();
 
   // Create the HTTP request task
@@ -187,19 +196,28 @@ LocationDto buffer[4096];
 void loop()
 {
 
-  for (int i = 0; i < CARS_BUFFER_SIZE; i++)
-  {
-    if (cars[i] != nullptr)
-    {
-      Car *car = cars[i];
+  Car *car = cars[0];
 
-      Location location = car->getLocation();
+  Location location = car->getLocation();
 
-      Serial.print("driver number: ");
-      Serial.print(cars[i]->driverNumber);
-      Serial.print(" position: ");
-      Serial.println(location.position);
-    }
-  }
-  delay(2000); // Delay for 1 second
+  Serial.print("driver number: ");
+  Serial.print(cars[0]->driverNumber);
+  Serial.print(" position: ");
+  Serial.println(location.position);
+
+  // for (int i = 0; i < CARS_BUFFER_SIZE; i++)
+  // {
+  //   if (cars[i] != nullptr)
+  //   {
+  //     Car *car = cars[i];
+
+  //     Location location = car->getLocation();
+
+  //     Serial.print("driver number: ");
+  //     Serial.print(cars[i]->driverNumber);
+  //     Serial.print(" position: ");
+  //     Serial.println(location.position);
+  //   }
+  // }
+  // delay(2000); // Delay for 2 seconds
 }

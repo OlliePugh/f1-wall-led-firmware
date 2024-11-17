@@ -33,7 +33,7 @@ int LocationService::fetchData(LocationDto *locations)
         {
             locations[i].driverNumer = location["driverNumber"].as<int>();
             locations[i].position = location["location"].as<float>();
-            locations[i].occuredAt = location["occurredAt"].as<uint64_t>();
+            locations[i].occuredAt = location["date"].as<uint64_t>();
             i++;
         }
     }
