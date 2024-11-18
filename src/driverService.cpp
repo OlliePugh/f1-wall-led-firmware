@@ -32,7 +32,12 @@ int DriverService::fetchData(Driver *drivers)
         {
             int driverNumber = driver["driverNumber"].as<int>();
             String name = driver["nameAcronym"].as<String>();
-            Driver driverInstance = {driverNumber, name};
+            String colorString = driver["teamColor"].as<String>();
+            int r = strtol(colorString.substring(0, 2).c_str(), NULL, 16);
+            int g = strtol(colorString.substring(2, 4).c_str(), NULL, 16);
+            int b = strtol(colorString.substring(4, 6).c_str(), NULL, 16);
+            CRGB color = CRGB(r, g, b);
+            Driver driverInstance = {driverNumber, name, color};
             drivers[i++] = driverInstance;
         }
     }

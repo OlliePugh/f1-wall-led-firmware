@@ -5,10 +5,17 @@
 #include <freertos/semphr.h>
 #include <ArduinoJson.h>
 #include <secrets.h>
+#include <FastLED.h>
 
 #include "locationService.h"
 #include "driverService.h"
 #include "timeService.h"
+
+#define NUM_LEDS 300
+#define DATA_PIN 4
+CRGB leds[NUM_LEDS];
+
+SET_LOOP_TASK_STACK_SIZE(16 * 1024); // 16KB
 
 const char *ssid = SSID;
 const char *password = PASSWORD;
@@ -37,7 +44,8 @@ private:
 public:
   uint8_t driverNumber;
   String name;
-  Car(uint8_t _driverNumber, String _name) : driverNumber(_driverNumber), name(_name)
+  CRGB color;
+  Car(uint8_t _driverNumber, String _name, CRGB _color) : driverNumber(_driverNumber), name(_name), color(_color)
   {
     xMutex = xSemaphoreCreateMutex();
     for (int i = 0; i < MAX_LOCATIONS; i++)
@@ -147,7 +155,7 @@ public:
     }
   }
 
-  Location *getLocation()
+  float getLocation()
   {
     removeOutdatedLocations();
     if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
@@ -159,13 +167,14 @@ public:
       if (previous == nullptr)
       {
         xSemaphoreGive(xMutex);
-        return nullptr;
+        return -1;
       }
 
       if (next == nullptr)
       {
+        float position = previous->position;
         xSemaphoreGive(xMutex);
-        return previous;
+        return position;
       }
 
       // get the current time from the rtc
@@ -176,13 +185,13 @@ public:
       {
         // calculate the position between the two locations
         float position = previous->position + (next->position - previous->position) * (currentTime - previous->occurredAt) / (next->occurredAt - previous->occurredAt);
-        loc = new Location{currentTime, position};
+        xSemaphoreGive(xMutex);
+        return position;
       }
       xSemaphoreGive(xMutex);
-      return loc;
     }
 
-    return nullptr;
+    return -1;
   }
 
   void debug()
@@ -288,7 +297,7 @@ void loadDrivers()
   }
   for (int i = 0; i < driverCount; i++)
   {
-    cars[i] = new Car(driverNumbers[i].driverNumber, driverNumbers[i].name);
+    cars[i] = new Car(driverNumbers[i].driverNumber, driverNumbers[i].name, driverNumbers[i].color);
   }
 }
 
@@ -308,6 +317,9 @@ void setup()
   timeService.setup();
   loadDrivers();
 
+  FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.show();
+
   // Create the HTTP request task
   xTaskCreate(httpRequestTask, "HTTP Request Task", 32768, NULL, 1, NULL);
 }
@@ -315,18 +327,26 @@ void setup()
 LocationDto buffer[4096];
 void loop()
 {
+  FastLED.show();
+  // set all leds to white
+  for (int i = 0; i < NUM_LEDS; i++)
+  {
+    leds[i].setRGB(50, 50, 50);
+  }
+
   for (int i = 0; i < CARS_BUFFER_SIZE; i++)
   {
     if (cars[i] != nullptr)
     {
-      Location *loc = cars[i]->getLocation();
-      if (loc != nullptr)
+      float loc = cars[i]->getLocation();
+      if (loc != -1)
       {
-        Serial.print(">");
-        Serial.print(cars[i]->name);
-        Serial.print(":");
-        Serial.println(loc->position);
-        delete loc;
+        // calculate the led index
+        int ledIndex = (int)((loc / 100) * NUM_LEDS) - 1;
+        ledIndex = max(0, min(NUM_LEDS - 1, ledIndex));
+
+        // set the led to the color of the driver
+        leds[ledIndex] = cars[i]->color;
       }
       else
       {
@@ -334,4 +354,5 @@ void loop()
       }
     }
   }
+  delay(1000 / 60);
 }
