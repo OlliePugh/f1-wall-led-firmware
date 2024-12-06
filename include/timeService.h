@@ -6,6 +6,9 @@
 
 class TimeService
 {
+private:
+    static int const OFFSET;
+
 public:
     TimeService(ESP32Time *rtc);
     uint64_t getTime();

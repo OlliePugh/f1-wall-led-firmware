@@ -11,9 +11,12 @@
 #include "driverService.h"
 #include "timeService.h"
 
-#define NUM_LEDS 300
-#define DATA_PIN 4
+#define NUM_LEDS 297
+#define DATA_PIN 19
 CRGB leds[NUM_LEDS];
+
+#define LEADING_AFFECT 3.0f
+#define SMOOTHING_ENABLED false
 
 SET_LOOP_TASK_STACK_SIZE(16 * 1024); // 16KB
 
@@ -40,6 +43,7 @@ private:
   static const int MAX_LOCATIONS = 128;
   Location *locations[MAX_LOCATIONS];
   SemaphoreHandle_t xMutex;
+  float lastRequestedLocation = -1;
 
 public:
   uint8_t driverNumber;
@@ -167,13 +171,14 @@ public:
       if (previous == nullptr)
       {
         xSemaphoreGive(xMutex);
-        return -1;
+        return lastRequestedLocation;
       }
 
       if (next == nullptr)
       {
         float position = previous->position;
         xSemaphoreGive(xMutex);
+        lastRequestedLocation = position;
         return position;
       }
 
@@ -184,14 +189,28 @@ public:
       if (previous->occurredAt <= currentTime && currentTime <= next->occurredAt)
       {
         // calculate the position between the two locations
-        float position = previous->position + (next->position - previous->position) * (currentTime - previous->occurredAt) / (next->occurredAt - previous->occurredAt);
+        float position;
+        if (previous->position > 90 && next->position < 10)
+        {
+          // handle wrap-around from 99 to 1
+          position = previous->position + (next->position + 100 - previous->position) * (currentTime - previous->occurredAt) / (next->occurredAt - previous->occurredAt);
+          if (position >= 100)
+          {
+            position -= 100;
+          }
+        }
+        else
+        {
+          position = previous->position + (next->position - previous->position) * (currentTime - previous->occurredAt) / (next->occurredAt - previous->occurredAt);
+        }
         xSemaphoreGive(xMutex);
+        lastRequestedLocation = position;
         return position;
       }
       xSemaphoreGive(xMutex);
     }
 
-    return -1;
+    return lastRequestedLocation;
   }
 
   void debug()
@@ -339,18 +358,46 @@ void loop()
     if (cars[i] != nullptr)
     {
       float loc = cars[i]->getLocation();
+
       if (loc != -1)
       {
-        // calculate the led index
-        int ledIndex = (int)((loc / 100) * NUM_LEDS) - 1;
-        ledIndex = max(0, min(NUM_LEDS - 1, ledIndex));
 
-        // set the led to the color of the driver
-        leds[ledIndex] = cars[i]->color;
+        if (SMOOTHING_ENABLED)
+        {
+          float ledPosition = ((loc / 100) * NUM_LEDS);
+
+          int ledIndex = ledPosition;
+
+          ledIndex = max(0, min(NUM_LEDS - 1, ledIndex));
+
+          // calculate the fractional part of the location
+          float fractionalPart = ledPosition - ledIndex;
+
+          CRGB following = CRGB(cars[i]->color).fadeLightBy(255 * pow(fractionalPart, LEADING_AFFECT));
+          CRGB leading = CRGB(cars[i]->color).fadeLightBy(255 * pow(1.0f - fractionalPart, LEADING_AFFECT));
+
+          // set the led to the color of the driver with the appropriate brightness
+          leds[ledIndex] += following;
+
+          // set the next led to the color of the driver with the remaining brightness
+          leds[(ledIndex + 1) % NUM_LEDS] += leading;
+        }
+        else
+        {
+
+          float ledPosition = ((loc / 100) * NUM_LEDS);
+
+          int ledIndex = ledPosition;
+
+          ledIndex = max(0, min(NUM_LEDS - 1, ledIndex));
+
+          leds[ledIndex] = cars[i]->color;
+        }
       }
       else
       {
-        Serial.println("No valid location");
+        Serial.print("No valid location for car number ");
+        Serial.println(cars[i]->driverNumber);
       }
     }
   }

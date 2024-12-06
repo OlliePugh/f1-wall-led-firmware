@@ -22,9 +22,11 @@ void TimeService::setServerTime(uint64_t currentServerTime)
     rtc->setTime(currentServerTime / 1000ULL, (currentServerTime % 1000ULL));
 }
 
+const int TimeService::OFFSET = 0;
+
 void TimeService::setup()
 {
-    configTime(0, 0, endpoint.c_str());
+    configTime(TimeService::OFFSET, 0, endpoint.c_str());
     struct tm timeinfo;
     if (getLocalTime(&timeinfo))
     {
